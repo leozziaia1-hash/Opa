@@ -158,26 +158,85 @@ export class CameraSystem {
     else if (isStationaryPitService) {
       pitStop.broadcastCamName = 'CÁMARA PIT LANE 4K · BOX APEX SCUDERIA';
       const t = pitStop.elapsedTime;
+      const total = Math.max(2, pitStop.totalDuration);
+      const orbitT = Math.min(1.0, Math.max(0, t / total));
       const boxX = pitStop.pitBoxX;
-      const boxZ = -110.5;
 
-      // Elevated crane-jib broadcast camera position: mounted overhead on pit wall looking across box
-      const craneX = boxX - 10.5 + Math.sin(t * 0.45) * 1.8;
-      const craneY = 3.65 + Math.sin(t * 0.3) * 0.35;
-      const craneZ = boxZ + 6.8 + Math.cos(t * 0.35) * 1.2;
+      // Elevated trackside crane-jib camera on pit wall looking across box toward garages
+      const idealCamX = boxX + THREE.MathUtils.lerp(6.2, -5.8, orbitT);
+      const idealCamZ = -116.2 + Math.sin(orbitT * Math.PI) * 0.4;
+      const idealCamY = 3.25 + Math.sin(t * 0.6) * 0.08;
 
-      const targetX = boxX + 0.2;
-      const targetY = 0.58 + pitStop.carElevatedY * 0.5;
-      const targetZ = boxZ;
+      // Focus accurately on the central chassis and wheel mechanics at the active pit box
+      const idealTargetX = boxX + THREE.MathUtils.lerp(0.5, -0.5, orbitT);
+      const idealTargetY = 0.72 + pitStop.carElevatedY * 0.5;
+      const idealTargetZ = -110.5;
 
-      const broadcastLerp = 1.0 - Math.exp(-6.0 * dt);
-      this.cameraPos.x += (craneX - this.cameraPos.x) * broadcastLerp;
-      this.cameraPos.y += (craneY - this.cameraPos.y) * broadcastLerp;
-      this.cameraPos.z += (craneZ - this.cameraPos.z) * broadcastLerp;
+      // Fluid broadcast gimbal damping
+      const camPosLerp = Math.min(1.0, 5.0 * dt);
+      const camTargetLerp = Math.min(1.0, 6.0 * dt);
 
-      this.cameraTarget.x += (targetX - this.cameraTarget.x) * broadcastLerp;
-      this.cameraTarget.y += (targetY - this.cameraTarget.y) * broadcastLerp;
-      this.cameraTarget.z += (targetZ - this.cameraTarget.z) * broadcastLerp;
+      this.cameraPos.x += (idealCamX - this.cameraPos.x) * camPosLerp;
+      this.cameraPos.y += (idealCamY - this.cameraPos.y) * camPosLerp;
+      this.cameraPos.z += (idealCamZ - this.cameraPos.z) * camPosLerp;
+
+      this.cameraTarget.x += (idealTargetX - this.cameraTarget.x) * camTargetLerp;
+      this.cameraTarget.y += (idealTargetY - this.cameraTarget.y) * camTargetLerp;
+      this.cameraTarget.z += (idealTargetZ - this.cameraTarget.z) * camTargetLerp;
+
+      this.camera.position.copy(this.cameraPos);
+      this.camera.lookAt(this.cameraTarget);
+      return;
+    }
+    // 3.5. DYNAMIC LAUNCH CAM & SEAMLESS HANDOVER (RELEASED PHASE)
+    else if (isReleased) {
+      pitStop.broadcastCamName = 'SALIDA DE BOXES · LANZAMIENTO';
+      const distConfig = CameraSystem.DIST_PRESETS[this.cameraDistance];
+      const aspect = this.camera.aspect;
+      const isPortrait = aspect < 1.0;
+      const portraitDistFactor = isPortrait ? Math.max(1.30, 1.0 + (1.0 - aspect) * 0.65) : 1.0;
+      const portraitHeightFactor = isPortrait ? 1.28 : 1.0;
+
+      const effectiveDist = distConfig.baseDist * portraitDistFactor;
+      const effectiveHeight = distConfig.baseHeight * portraitHeightFactor;
+      const effectiveTargetY = distConfig.targetY * (isPortrait ? 1.15 : 1.0);
+
+      // Smooth trailing yaw orientation aligned with smoothedCamYaw
+      let yawDiff = yaw - this.smoothedCamYaw;
+      while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+      while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      this.smoothedCamYaw += yawDiff * Math.min(1.0, 14.0 * dt);
+
+      const camForwardX = Math.sin(this.smoothedCamYaw);
+      const camForwardZ = Math.cos(this.smoothedCamYaw);
+
+      const currentRelX = this.cameraPos.x - carPos.x;
+      const currentRelY = this.cameraPos.y - carPos.y;
+      const currentRelZ = this.cameraPos.z - carPos.z;
+
+      const targetRelX = -camForwardX * effectiveDist;
+      const targetRelY = effectiveHeight;
+      const targetRelZ = -camForwardZ * effectiveDist;
+
+      const currentRelTgtX = this.cameraTarget.x - carPos.x;
+      const currentRelTgtY = this.cameraTarget.y - carPos.y;
+      const currentRelTgtZ = this.cameraTarget.z - carPos.z;
+
+      const targetRelTgtX = camForwardX * distConfig.lookAhead;
+      const targetRelTgtY = effectiveTargetY;
+      const targetRelTgtZ = camForwardZ * distConfig.lookAhead;
+
+      const blendRate = 1.0 - Math.exp(-12.0 * dt);
+      const newRelX = THREE.MathUtils.lerp(currentRelX, targetRelX, blendRate);
+      const newRelY = THREE.MathUtils.lerp(currentRelY, targetRelY, blendRate);
+      const newRelZ = THREE.MathUtils.lerp(currentRelZ, targetRelZ, blendRate);
+
+      const newRelTgtX = THREE.MathUtils.lerp(currentRelTgtX, targetRelTgtX, blendRate);
+      const newRelTgtY = THREE.MathUtils.lerp(currentRelTgtY, targetRelTgtY, blendRate);
+      const newRelTgtZ = THREE.MathUtils.lerp(currentRelTgtZ, targetRelTgtZ, blendRate);
+
+      this.cameraPos.set(carPos.x + newRelX, carPos.y + newRelY, carPos.z + newRelZ);
+      this.cameraTarget.set(carPos.x + newRelTgtX, carPos.y + newRelTgtY, carPos.z + newRelTgtZ);
 
       this.camera.position.copy(this.cameraPos);
       this.camera.lookAt(this.cameraTarget);
