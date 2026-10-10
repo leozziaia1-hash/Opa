@@ -1008,17 +1008,15 @@ export class TrackBuilder {
       if (gx >= 120.0 && gx <= 140.0 && Math.abs(gz) <= 94) return false;
       if (gx >= -140.0 && gx <= -120.0 && Math.abs(gz) <= 94) return false;
 
-      // 6. Corner Curved Roads, Kerbs & Gravel Traps (in the 4 corner apexes)
+      // 6. Corner Curved Roads, Kerbs & Infield Margin (in all 4 corner apexes)
+      // Strictly exclude any grass tuft within 65m of every corner center:
+      // Guarantees 100% clean FIA piano curbs, clean arcén and strict safety margin across all vertices!
       for (const cc of cornerCenters) {
         const dx = gx - cc.cx;
         const dz = gz - cc.cz;
-        const signX = Math.sign(cc.cx);
-        const signZ = Math.sign(cc.cz);
-        if (dx * signX >= -2 && dz * signZ >= -2) {
-          const distSq = dx * dx + dz * dz;
-          if (distSq >= 25.5 * 25.5 && distSq <= 63.0 * 63.0) {
-            return false;
-          }
+        const distToCenter = Math.hypot(dx, dz);
+        if (distToCenter <= 65.0) {
+          return false;
         }
       }
 
@@ -1094,20 +1092,8 @@ export class TrackBuilder {
     });
 
     // =========================================================================
-    // 2. 4 CORNER INNER APEX NATURAL GREENS (Inside corner apexes, 4.0m to 23.2m)
+    // 2. CORNER APEX INFIELD HUBS: Strictly clean FIA piano curbs with flush arcén (Zero grass tufts)
     // =========================================================================
-    cornerCenters.forEach(({ cx, cz }) => {
-      const signX = Math.sign(cx);
-      const signZ = Math.sign(cz);
-      for (let r = 4.0; r <= 23.2; r += 2.0) {
-        const step = 1.35 / r;
-        for (let a = 0.06; a < Math.PI / 2 - 0.06; a += step) {
-          const kx = cx - signX * Math.cos(a) * r;
-          const kz = cz - signZ * Math.sin(a) * r;
-          addTuft(kx, kz, 1.30, 0.40);
-        }
-      }
-    });
 
     // =========================================================================
     // 3. INFIELD PERIMETER CORRIDORS (Hugging inner barrier walls & tree lines)
@@ -1196,25 +1182,50 @@ export class TrackBuilder {
   public getDistanceToTrack(x: number, z: number): number {
     const c = this.innerCornerCenter; // 92
     const r = this.cornerRadius; // 38
+    const half = this.halfSize; // 130
+
+    // Pit lane, garages and paddock corridor on South Straight (strictly flat: z from -138 to -84, |x| <= 96)
+    if (z >= -138 && z <= -84 && Math.abs(x) <= 96) return 0;
+
     // Check 4 straight segments
+    let minDist = Infinity;
     if (Math.abs(x) <= c) {
-      // Pit lane, garages and paddock corridor on South Straight (strictly flat: z from -138 to -84, |x| <= 68)
-      if (z >= -138 && z <= -84 && Math.abs(x) <= 68) return 0;
-      const dSouth = Math.abs(z - (-this.halfSize));
-      const dNorth = Math.abs(z - this.halfSize);
-      if (dSouth < 22 || dNorth < 22) return Math.min(dSouth, dNorth);
+      const dSouth = Math.abs(z - (-half));
+      const dNorth = Math.abs(z - half);
+      minDist = Math.min(minDist, dSouth, dNorth);
     }
     if (Math.abs(z) <= c) {
-      const dEast = Math.abs(x - this.halfSize);
-      const dWest = Math.abs(x - (-this.halfSize));
-      if (dEast < 22 || dWest < 22) return Math.min(dEast, dWest);
+      const dEast = Math.abs(x - half);
+      const dWest = Math.abs(x - (-half));
+      minDist = Math.min(minDist, dEast, dWest);
     }
+
     // Check 4 corners
-    const seDist = Math.abs(Math.hypot(x - c, z - (-c)) - r);
-    const neDist = Math.abs(Math.hypot(x - c, z - c) - r);
-    const nwDist = Math.abs(Math.hypot(x - (-c), z - c) - r);
-    const swDist = Math.abs(Math.hypot(x - (-c), z - (-c)) - r);
-    return Math.min(seDist, neDist, nwDist, swDist);
+    const corners = [
+      { cx: c, cz: -c, sx: 1, sz: -1 },
+      { cx: c, cz: c, sx: 1, sz: 1 },
+      { cx: -c, cz: c, sx: -1, sz: 1 },
+      { cx: -c, cz: -c, sx: -1, sz: -1 },
+    ];
+
+    for (const corn of corners) {
+      const dx = x - corn.cx;
+      const dz = z - corn.cz;
+      if (dx * corn.sx >= -1 && dz * corn.sz >= -1) {
+        // In or near the corner turn quadrant
+        const d = Math.hypot(dx, dz);
+        minDist = Math.min(minDist, Math.abs(d - r));
+      } else {
+        // In the inner corner apex hub
+        const dCenter = Math.hypot(dx, dz);
+        if (dCenter <= 46.0) {
+          // Inside apex hub: distance to nearest track limit edge is safely bounded under clearance
+          minDist = Math.min(minDist, Math.max(0, 30.0 - dCenter));
+        }
+      }
+    }
+
+    return minDist;
   }
 
   /**
@@ -1308,31 +1319,39 @@ export class TrackBuilder {
     sWestGeo.translate(-half - w / 2 - shoulderWidth / 2 - 0.1, 0.007, 0);
     dirtGeos.push(sWestGeo);
 
-    // Straight Inner Dirt Shoulders (North, East, West)
-    const sNorthInGeo = straightShoulderGeoX.clone();
+    // Straight Inner Dirt Shoulders (North, East, West) - strictly bounded to c * 2 (184m)
+    // so they do not protrude as straight flat slabs into the curved corner apexes.
+    const straightInnerShoulderGeoX = new THREE.PlaneGeometry(c * 2, shoulderWidth);
+    straightInnerShoulderGeoX.rotateX(-Math.PI / 2);
+
+    const straightInnerShoulderGeoZ = new THREE.PlaneGeometry(shoulderWidth, c * 2);
+    straightInnerShoulderGeoZ.rotateX(-Math.PI / 2);
+
+    const sNorthInGeo = straightInnerShoulderGeoX.clone();
     sNorthInGeo.translate(0, 0.007, half - w / 2 - shoulderWidth / 2 - 0.1);
     dirtGeos.push(sNorthInGeo);
 
-    const sEastInGeo = straightShoulderGeoZ.clone();
+    const sEastInGeo = straightInnerShoulderGeoZ.clone();
     sEastInGeo.translate(half - w / 2 - shoulderWidth / 2 - 0.1, 0.007, 0);
     dirtGeos.push(sEastInGeo);
 
-    const sWestInGeo = straightShoulderGeoZ.clone();
+    const sWestInGeo = straightInnerShoulderGeoZ.clone();
     sWestInGeo.translate(-half + w / 2 + shoulderWidth / 2 + 0.1, 0.007, 0);
     dirtGeos.push(sWestInGeo);
 
-    // 4 Corner Apex Inner Dirt Arcs
+    // 4 Corner Apex Inner Dirt Arcs (Seamlessly joining behind the inner FIA curbs with 32 smooth segments)
     const innerR = this.cornerRadius - w / 2;
+    const kerbWidth = 1.6;
     cornerArcs.forEach((ca) => {
       dirtGeos.push(
         this.createCornerRoadGeometry(
           ca.cx,
           ca.cz,
-          innerR - shoulderWidth,
-          innerR,
+          innerR - kerbWidth - shoulderWidth,
+          innerR - kerbWidth,
           ca.startA,
           ca.endA,
-          24,
+          32,
           0.007
         )
       );

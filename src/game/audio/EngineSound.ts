@@ -301,7 +301,7 @@ export class EngineSound {
       this.f1WhineFilter.Q.setValueAtTime(1.8, this.ctx.currentTime);
 
       this.f1WhineGain = this.ctx.createGain();
-      this.f1WhineGain.gain.setValueAtTime(0.005, this.ctx.currentTime);
+      this.f1WhineGain.gain.setValueAtTime(0.0, this.ctx.currentTime);
 
       this.f1WhineOsc.connect(this.f1WhineFilter);
       this.f1WhineFilter.connect(this.f1WhineGain);
@@ -548,7 +548,7 @@ export class EngineSound {
     this.windFilter.Q.setValueAtTime(1.2, this.ctx.currentTime);
 
     this.windGain = this.ctx.createGain();
-    this.windGain.gain.setValueAtTime(0.001, this.ctx.currentTime);
+    this.windGain.gain.setValueAtTime(0.0, this.ctx.currentTime);
 
     this.windSource = this.ctx.createBufferSource();
     this.windSource.buffer = windBuffer;
@@ -680,8 +680,8 @@ export class EngineSound {
       this.oscHarmonic1.frequency.setTargetAtTime(baseFreq * 2.0, t, 0.035);
     }
     if (this.oscHarmonic2) {
-      // 1.5 order cross-plane texture
-      this.oscHarmonic2.frequency.setTargetAtTime(baseFreq * 1.5 + 0.3, t, 0.035);
+      // 1.5 order cross-plane texture (exact harmonic integer ratio, eliminates intermodulation beating)
+      this.oscHarmonic2.frequency.setTargetAtTime(baseFreq * 1.5, t, 0.035);
     }
     if (this.oscIntake) {
       // Big-block intake scoop roar
@@ -692,16 +692,9 @@ export class EngineSound {
       this.oscSub.frequency.setTargetAtTime(Math.max(40, rps * 1.45), t, 0.035);
     }
 
-    // Branch B: Subtle F1 Hybrid Aero / MGU-K Whine Modulation (Smooth pure sine wave, 100% preserved)
-    if (this.f1WhineOsc && this.f1WhineFilter && this.f1WhineGain) {
-      // High-tech F1 whistle frequency rises progressively with RPM & throttle (1500 Hz to 3400 Hz)
-      const f1Pitch = 1500 + rpmNorm * 1550 + throttleNorm * 350;
-      this.f1WhineOsc.frequency.setTargetAtTime(f1Pitch, t, 0.045);
-      this.f1WhineFilter.frequency.setTargetAtTime(f1Pitch, t, 0.045);
-
-      // Balanced 50/50 volume blend: subtle at idle, swells progressively under load (uninterrupted during rev cut)
-      const f1Volume = 0.012 + (rpmNorm * 0.18 + throttleSq * 0.24) * 0.90;
-      this.f1WhineGain.gain.setTargetAtTime(f1Volume, t, 0.04);
+    // Branch B: Synthetic F1 Hybrid / MGU-K Whine completely silenced to permanently eliminate radio interference whistle
+    if (this.f1WhineGain) {
+      this.f1WhineGain.gain.setTargetAtTime(0.0, t, 0.04);
     }
 
     // Branch A Mix: massive guttural American muscle roar with reinforced deep bass
@@ -750,8 +743,8 @@ export class EngineSound {
     }
 
     // 3-Band Dynamic Acoustic Tire Friction Modulation
-    const speedGate = Math.min(1.0, speed / 3.5);
-    const slipIntensity = Math.min(1.0, Math.max(0.0, (slipRatio - 0.16) * 1.6)) * speedGate;
+    const speedGate = Math.min(1.0, Math.max(0, (speed - 1.5) / 4.0));
+    const slipIntensity = Math.min(1.0, Math.max(0.0, (slipRatio - 0.22) * 1.6)) * speedGate;
 
     // 1. Mid-Band Squeal
     if (this.screechGain && this.screechFilter) {
@@ -762,7 +755,7 @@ export class EngineSound {
 
     // 2. Low-Band Heavy Scrub Rumble
     if (this.tireRumbleGain && this.tireRumbleFilter) {
-      const rumbleIntensity = Math.min(1.0, Math.max(0.0, (slipRatio - 0.12) * 1.8)) * speedGate;
+      const rumbleIntensity = Math.min(1.0, Math.max(0.0, (slipRatio - 0.18) * 1.8)) * speedGate;
       this.tireRumbleGain.gain.setTargetAtTime(rumbleIntensity * 0.24, t, 0.04);
       const rumbleFreq = 180 + Math.min(220, speed * 4.0);
       this.tireRumbleFilter.frequency.setTargetAtTime(rumbleFreq, t, 0.04);
@@ -772,9 +765,8 @@ export class EngineSound {
       this.tireTearGain.gain.setTargetAtTime(0, t, 0.04);
     }
 
-    // 1. Aeroacoustic Wind Roar: Quadratic scaling with velocity (V^2 aero pressure) + High-Speed Buffeting (> 200 km/h)
+    // 1. Aeroacoustic Wind Roar: Smooth quadratic profile starting only at high speeds (> 43 km/h)
     if (this.windGain && this.windFilter) {
-      const speedNorm = Math.min(1.0, speed / 98.0); // 98 m/s = ~353 km/h
       const speedKmh = speed * 3.6;
 
       let buffetingBonus = 0;
@@ -782,11 +774,14 @@ export class EngineSound {
         buffetingBonus = Math.pow(Math.min(1.0, (speedKmh - 200) / 140.0), 1.8) * 0.32;
       }
 
-      const windTargetGain = (Math.pow(speedNorm, 2.0) * 0.40) + buffetingBonus;
-      this.windGain.gain.setTargetAtTime(Math.max(0.001, windTargetGain), t, 0.05);
+      const windMinSpeed = 12.0; // ~43 km/h
+      const windTargetGain = speed < windMinSpeed
+        ? 0.0
+        : (Math.pow(Math.max(0, (speed - windMinSpeed) / 86.0), 2.2) * 0.35) + buffetingBonus;
+      this.windGain.gain.setTargetAtTime(windTargetGain, t, 0.05);
 
-      // Lowpass cutoff expands from 350 Hz to 6400 Hz for visceral high-speed air roar
-      const targetCutoff = 350 + Math.pow(speedNorm, 1.35) * 4850 + buffetingBonus * 1200;
+      // Lowpass cutoff expands gently with speed, avoiding any high-frequency radio static hiss
+      const targetCutoff = 250 + Math.pow(Math.max(0, (speed - windMinSpeed) / 86.0), 1.5) * 2600 + buffetingBonus * 800;
       this.windFilter.frequency.setTargetAtTime(targetCutoff, t, 0.05);
     }
 

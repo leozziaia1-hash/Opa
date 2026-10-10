@@ -183,22 +183,26 @@ export class OrganicTerrainBuilder {
       const dist = getDistToTrack(worldX, worldZ);
 
       let height = 0;
-      // Strictly flatten terrain under pit building, team paddocks, garages and Modern VIP headquarters
-      const isUnderPitBuilding = Math.abs(worldX) <= 120 && worldZ >= -135 && worldZ <= -70;
-      const isUnderVIPBuilding = worldX >= 60 && worldX <= 120 && worldZ >= -175 && worldZ <= -125;
-      if (isUnderPitBuilding || isUnderVIPBuilding) {
+      // Strictly flatten terrain across the entire circuit area, infield, and perimeter runoff (152m boundary)
+      // This mathematically guarantees zero terrain triangles ever penetrate track asphalt, kerbs, or shoulders
+      const isInfieldOrTrackCorridor = Math.abs(worldX) <= 152 && Math.abs(worldZ) <= 152;
+      const isUnderPitOrPaddock = Math.abs(worldX) <= 125 && worldZ >= -140 && worldZ <= -65;
+      const isNearAnyCorner = Math.hypot(Math.abs(worldX) - 92, Math.abs(worldZ) - 92) <= 70.0;
+
+      if (isInfieldOrTrackCorridor || isUnderPitOrPaddock || isNearAnyCorner || dist <= clearanceDist + 16.0) {
         height = 0;
-      } else if (dist > clearanceDist) {
-        // Natural rolling harmonic terrain modulation
-        const t = Math.min(1.0, (dist - clearanceDist) / 32.0);
+      } else {
+        // Natural rolling harmonic terrain modulation strictly in the distant outfield beyond barrier walls
+        const effectiveDist = dist - (clearanceDist + 16.0);
+        const t = Math.min(1.0, effectiveDist / 36.0);
         const elevationWeight = t * t * (3 - 2 * t); // smoothstep transition
 
-        // Low-frequency rolling waves (drainage valleys and organic berms)
+        // Low-frequency rolling waves (gentle drainage berms and natural rolling countryside)
         const wave1 = Math.sin(worldX * 0.012 + Math.cos(worldZ * 0.010) * 1.2) * 2.8;
         const wave2 = Math.cos(worldZ * 0.018 + worldX * 0.007) * 2.1;
         const wave3 = Math.sin((worldX + worldZ) * 0.024) * 0.9;
 
-        height = (wave1 + wave2 + wave3) * elevationWeight;
+        height = Math.max(0, (wave1 + wave2 + wave3) * elevationWeight);
       }
 
       posAttr.setY(i, height);

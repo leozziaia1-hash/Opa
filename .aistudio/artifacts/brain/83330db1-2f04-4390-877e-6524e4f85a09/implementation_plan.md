@@ -1,143 +1,103 @@
-# Plan de Refactorización: Apex GT Racing Engine & Zero-GC Memory Pool (Máxima Fidelidad Visual)
+# Plan Maestro: Depuración Acústica Dinámica y Saneamiento Geométrico de Vértices
 
-Plan de arquitectura y optimización de alto rendimiento para descomponer la clase monolítica `RacingGameEngine.ts` en subsistemas modulares independientes, erradicar asignaciones de memoria en el bucle de render mediante una piscina centralizada de vectores/matrices (`MathPool`), e implementar un simulador de físicas con *fixed timestep* a 120Hz e interpolación sub-frame.
-
----
-
-### Compromiso de Integridad y Fidelidad Visual (Anti-Degradación)
+Plan técnico para erradicar definitivamente el sonido parásito de tipo interferencia de radio (que se activa únicamente cuando el vehículo supera los 0 km/h) y corregir la intrusión de malla de césped/terreno en los ápices de las curvas del Circuito 1 (Square Apex), manteniendo 60/120 FPS estables.
 
 > [!IMPORTANT]
-> **Garantía Estricta: Cero Pérdida de Calidad Visual ni Elementos**:
-> - **Todos los Efectos Cinemáticos Intactos**: Se preservan al 100% el *Heat Haze* (distorsión térmica de motor en GPU), *Speed Post Effect* (visión túnel y aberración cromática a alta velocidad), *Cinematic Optics* y el sistema de cielo dinámico procedural (*DynamicSkySystem*).
-> - **Preservación Integral de Sombras y Materiales**: Se mantienen intactas las sombras suaves direccionales con seguimiento dinámico del monoplaza, texturas PBR de asfalto, reflejos en carrocería y shaders de fibra de carbono.
-> - **Todos los Elementos del Mundo y Props**: Muros de contención, tribunas con público animado (*GrandstandCrowdSystem*), cabinas de comisarios, edificios VIP modernos, gantry de boxes y fondo montañoso distante (*DistantMountainBackdropBuilder*) se conservan sin omitir ningún objeto ni simplificar mallas.
-> - **Partículas y Efectos Físicos**: Skidmarks de 4 ruedas independientes, humo de derrape/burnout, chispas por fondo plano o pinchazos, y vórtices aerodinámicos de alerón se mantienen idénticos.
-> - **Origen de la Mejora**: El incremento en fluidez (60/120 FPS estables) proviene exclusivamente de **eliminar el Garbage Collector (GC)** mediante el banco estático `MathPool`, desacoplar la CPU y estabilizar la física con el acumulador a 120Hz, **sin recortar resolución ni gráficos**.
+> **Diagnóstico Clave Confirmado:**
+> - **Comportamiento Acústico**: El sonido de interferencia/radiofrecuencia NO se escucha a 0 km/h (ralentí limpio), sino que se dispara inmediatamente cuando el vehículo inicia la marcha (> 0 km/h) o se aplica carga de acelerador.
+> - **Causas Raíz Identificadas**:
+>   1. **`f1WhineOsc` (1500 Hz - 3400 Hz)**: Oscilador senoidal puro modulado por `loadFactor > 0.02` que se activa en cuanto el coche inicia movimiento, sonando como portadora de radio o silbido de alternador parásito.
+>   2. **`windGain` / `windSource`**: Búfer de ruido rosa/blanco con filtro pasobajo que se abre en cuanto `speed >= 1.0 m/s`, produciendo un siseo/estática constante de fondo que emula ruido de sintonizador de radio.
+>   3. **Fricción de neumático / Scrub en tracción**: La aceleración desde parado dispara micro-deslizamiento (`slipRatio > 0.12`), abriendo el filtro pasa-banda a 1400 Hz del búfer de fricción con sonido de estática.
+>   4. **Intermodulación en WaveShaper**: Saturación no lineal agresiva de armónicos que añade zumbido eléctrico bajo aceleración.
+> - **Causas Geométricas en Pista (Circuito 1)**:
+>   1. **Elevación ondulatoria del terreno base**: `SculptedOrganicTerrain` tiene cuadrícula de 12.5 m (64x64 en 800 m). Al elevarse fuera del radio de 46 m, la interpolación de triángulos estira aristas oblicuas que atraviesan la rasante horizontal del asfalto ($y = 0.005$) y del piano ($y = 0.025$).
+>   2. **Solapamiento y holgura en arcén de tierra**: El arcén interior se generaba solapando el radio del piano ($r = 27.8$ a $30.0$ vs piano $r = 28.4$ a $30.0$) dejando cuñas de discontinuidad en los empalmes recto-curva.
 
 ---
 
-### Decisiones Críticas Confirmadas
+## 1. Visión General y Diagnóstico Exhaustivo
 
-- **Estructura de Refactorización**: Extracción de subsistemas modulares (`CameraSystem`, `RaceLoopManager`, `CollisionSubsystem`) manteniendo `RacingGameEngine` como orquestador ligero y reactivo.
-- **Estrategia de Piscina de Memoria**: Piscina estática centralizada (`MathPool`) para vectores (`Vector3`), matrices (`Matrix4`), cuaterniones (`Quaternion`) y rayos (`Raycaster`), garantizando 0 asignaciones dinámicas por frame.
-- **Física y Timestep**: Acumulador temporal a 120Hz fijos (`dt = 8.333ms`) con interpolación alfa entre sub-frames para eliminar saltos temporales, traspaso de muros por lag y jitter visual.
+### A. Diagnóstico Acústico (El porqué a 0 km/h no se escucha y al moverse sí)
+Al estar el vehículo detenido ($0\text{ km/h}$, ralentí a $1000\text{ RPM}$, acelerador $0.0$, `slipRatio = 0`):
+- `f1Volume = 0.0` (la compuerta `loadFactor > 0.02` permanece cerrada).
+- `windTargetGain = 0.0` (la compuerta `speed < 1.0` permanece cerrada).
+- `tireRumbleGain = 0.0` y `screechGain = 0.0`.
+- Por tanto, al ralentí el motor suena sin ninguna estática.
 
----
+En el instante exacto en que el usuario pisa el acelerador o el vehículo comienza a moverse ($> 0\text{ km/h}$):
+1. **Disparo de `f1WhineOsc`**: El oscilador a 1500–3400 Hz se abre abruptamente hacia `this.engineBusGain`. Un tono senoidal puro continuo a 1.5 kHz suena de manera idéntica a una interferencia electromagnética de radio (RFI) o silbido de sintonizador.
+2. **Disparo de `windSource`**: Al superar $1.0\text{ m/s}$ ($3.6\text{ km/h}$), el búfer de ruido se suma al máster filtrado como ruido de banda ancha, añadiendo un siseo continuo tipo "fritura de radio".
+3. **Pico de tracción**: En salida de parado, el deslizamiento longitudinal supera el umbral del filtro pasa-banda de neumáticos a 1400 Hz, inyectando ráfagas de ruido aleatorio.
 
-## 1. Visión General y Objetivos Técnicos
-
-### El Problema Actual
-- `RacingGameEngine.ts` supera los 100 KB y 2.500 líneas de código, acumulando responsabilidades dispares (cámara cinematográfica, físicas, telemetría, pits, colisiones, render y checkpoints).
-- Se realizan múltiples llamadas a `new THREE.Vector3()` y objetos temporales en la cadena de animación `requestAnimationFrame`, provocando recolecciones de basura (*Garbage Collection pauses*) y caídas de framerate imprevistas.
-- El paso temporal de la física varía directamente con el frametime del navegador (`dt`), lo que causa inestabilidad a altas velocidades (>300 km/h) si el navegador sufre una microcaída de frames.
-
-### La Solución Arquitectónica
-1. **Descomposición Modular**:
-   - `CameraSystem.ts`: Manejo de vistas (`chase`, `hood`, `bumper`, `orbit`, `broadcast_pit`), suavizado angular de yaw y transiciones dinámicas de FOV.
-   - `RaceLoopManager.ts`: Cronometraje de vueltas, sectores, récords personales (*best lap*), banderas y coordinación con `CareerRaceManager`.
-   - `CollisionSubsystem.ts`: Verificación de límites de pista, bordillos de pianos (*kerbs*), barreras, muros de boxes y dispatch de daños mecánicos y deformación de chapa.
-   - `RacingGameEngine.ts`: Orquestador principal simplificado (~350 líneas) que inicializa Three.js, enlaza subsistemas y gestiona el ciclo de vida del juego.
-2. **Piscina Centralizada `MathPool` (Zero-GC)**:
-   - Banco estático de estructuras matemáticas prealojadas en memoria VRAM/Heap.
-   - Eliminación total de instanciaciones `new` dentro de `update()`, `physicsStep()`, cinemáticas y cálculos de partículas.
-3. **Paso Físico Fijo a 120Hz (*Fixed Timestep Accumulator*)**:
-   - Tasa de actualización de física constante a 120 ticks/segundo.
-   - Transformaciones gráficas suavizadas mediante interpolación de estados previo y actual ($\alpha = \text{acumulador} / \text{dt}_{\text{físico}}$).
+### B. Diagnóstico de Intrusión de Terreno en Curvas
+1. **Interpolación Poligonal de Malla**: En `OrganicTerrainBuilder.ts`, la malla de terreno tiene vértices cada 12.5 metros. Si un vértice en $(50, -50)$ se eleva 3 o 4 metros por las funciones senoidales, el triángulo que conecta con $(62.5, -62.5)$ cruza diagonalmente el plano de la pista, emergiendo hierba sobre el asfalto.
+2. **Geometría de Arcenes y Pianos**: El piano FIA interior tiene un ancho de 1.6 m (de $r = 30.0$ a $r = 28.4$). El arcén de tierra interior se extendía desde $27.8$ hasta $30.0$ m, solapando con el piano y dejando un hueco angular en la transición con la recta.
 
 ---
 
-## 2. Experiencia de Usuario y Rendimiento Visual
+## 2. Experiencia de Usuario y Acabado FIA
 
-- **Estabilidad de Framerate**: 60 FPS sólidos en hardware modesto y 120 FPS nativos en pantallas ProMotion / High-Refresh (120Hz/144Hz/240Hz) sin variabilidad en el comportamiento del monoplaza.
-- **Respuesta Cinemática de Cámara**: Movimientos de cámara fluidos sin cortes de posición al entrar a boxes, acelerar o trompear.
-- **Cero Reducción Gráfica**: La fidelidad visual se mantiene al 100%, con la misma riqueza visual, shaders y texturas que en la versión original.
-
----
-
-## 3. Decisiones de Diseño y Trade-offs
-
-| Decisión | Enfoque Elegido | Razón / Ventaja | Alternativa Descartada |
-| :--- | :--- | :--- | :--- |
-| **Arquitectura de Motor** | Subsistemas Modulares Orientados a Objetos | Mantiene compatibilidad total con la API existente de la UI y los componentes React sin romper tipos. | Arquitectura ECS completa (innecesariamente compleja y requeriría reescribir todo el juego). |
-| **Fidelidad Gráfica** | 100% de Calidad Visual Preservada | Se corrigen los cuellos de botella en la raíz (CPU / GC) sin sacrificar shaders, efectos ni mallas. | Reducción de resolución o eliminación de efectos de post-procesado (inaceptable). |
-| **Gestión de Memoria** | `MathPool` Estático Centralizado | Acceso inmediato O(1), sin overhead de acquire/release ni fugas de objetos olvidados. | Generic ObjectPool con acquire/release (propenso a olvidar devolver referencias en bucles complejos). |
-| **Frecuencia de Físicas** | Acumulador Fijo a 120Hz con Sub-stepping | Gran precisión en el agarre de neumáticos a 350 km/h, sin riesgo de traspasar guardarraíles. | Paso variable simple (provoca inestabilidad en picos de lag). |
+- **Pureza Acústica de Competición**:
+  - Al iniciar la marcha, el sonido responde exclusivamente con el rugido visceral del V8 (armónicos de admisión, pulso de escape profundo y resonancia de cámara).
+  - Eliminación total del tono senoidal parásito a 1.5 kHz (`f1WhineOsc` eliminado o sustituido por armónico de transmisión orgánico inaudible como interferencia).
+  - El ruido de viento aerodinámico solo abre a altas velocidades ($> 80\text{ km/h}$) con curva cúbica suave y sin siseos a baja velocidad.
+  - La distorsión por intermodulación (IMD) del WaveShaper queda calibrada con pre-ganancia conservadora para evitar zumbidos eléctricos.
+- **Vértice de Curva Limpio y Reglamentario**:
+  - Interior de la curva constituido estrictamente por el piano reglamentario FIA en rojo y blanco con biselado tridimensional.
+  - Arcén de tierra compactada continuo y hermético sin grietas ni desniveles.
+  - Terreno de hierba confinado rigurosamente a cota plana $y = -0.04\text{ m}$ en todo el interior del circuito, eliminando cualquier intrusión vegetal.
 
 ---
 
-## 4. Arquitectura Técnica y Diagrama de Sistemas
+## 3. Decisiones Técnicas y Compromisos
 
-### Diagrama de Flujo y Módulos
+- **Decisión 1: Silenciado Completo del `f1WhineOsc` o Transformación a Armónico Mecánico**
+  - *Enfoque*: Desactivar por completo el oscilador senoidal aislado `f1WhineOsc` (que genera la falsa impresión de interferencia de radio) o fijar su ganancia en 0.0. Toda la tonalidad del motor provendrá de la síntesis armónica aditiva del bloque V8.
+  - *Justificación*: Los motores V8 de competición no disponen de sistema híbrido MGU-K silbante. El tono senoidal a 1500 Hz es el causante directo del reporte del usuario.
+- **Decisión 2: Perfil Aerodinámico sin Fritura a Baja/Media Velocidad**
+  - *Enfoque*: Elevar el umbral de activación del viento a $22\text{ m/s}$ ($80\text{ km/h}$) con progresión $V^3$, asegurando silencio absoluto de ruido blanco durante aceleraciones a baja velocidad.
+- **Decisión 3: Zona de Exclusión Total del Terreno Infield en Circuito 1**
+  - *Enfoque*: En `OrganicTerrainBuilder.ts`, cualquier punto dentro de los límites interiores del circuito ($|x| \le 110\text{ m}$ y $|z| \le 110\text{ m}$) tendrá elevación forzada a `0.000` absoluto (plano a $-0.04\text{ m}$).
+  - *Justificación*: Elimina de raíz cualquier posibilidad geométrica de que aristas de 12.5 m perforen el asfalto.
+
+---
+
+## 4. Arquitectura Técnica y Diagrama del Sistema
 
 ```
- ┌────────────────────────────────────────────────────────────────────────┐
- │                              App.tsx / HUD                             │
- └───────────────────────────────────┬────────────────────────────────────┘
-                                     │ Inputs / Telemetry
- ┌───────────────────────────────────▼────────────────────────────────────┐
- │                     RacingGameEngine (Orchestrator)                    │
- │                                                                        │
- │  ┌──────────────────────────────────────────────────────────────────┐  │
- │  │                 Render Loop Tick (Preserves Shaders & FX)        │  │
- │  └───────┬──────────────────────────┬─────────────────────────┬─────┘  │
- └──────────┼──────────────────────────┼─────────────────────────┼────────┘
-            │                          │                         │
-            ▼                          ▼                         ▼
- ┌──────────────────────┐   ┌──────────────────────┐   ┌──────────────────┐
- │  CollisionSubsystem  │   │     CameraSystem     │   │ RaceLoopManager  │
- │                      │   │                      │   │                  │
- │ • Track Boundaries   │   │ • Chase / Hood / TV  │   │ • Lap & Sectors  │
- │ • Kerb Audio & Rumble│   │ • Dynamic FOV Lerp   │   │ • Best Lap Store │
- │ • Impact Deformation │   │ • Damped Yaw Track   │   │ • Leaderboard    │
- └──────────┬───────────┘   └──────────┬───────────┘   └────────┬─────────┘
-            │                          │                        │
-            └──────────────────────────┼────────────────────────┘
-                                       │
-                                       ▼
- ┌────────────────────────────────────────────────────────────────────────┐
- │                      MathPool (Zero-GC Scratch)                        │
- │  • Vector3: V0..V15     • Matrix4: M0..M3    • Raycaster: R0           │
- │  • Quaternion: Q0..Q3   • Euler: E0..E1      • Color: C0..C1           │
- └────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                    ARQUITECTURA DE CORRECCIÓN                          │
+├──────────────────────────────────┬─────────────────────────────────────┤
+│         PIPELINE DE AUDIO        │        PIPELINE GEOMÉTRICO          │
+│        (src/game/audio)          │        (src/game/world)             │
+├──────────────────────────────────┼─────────────────────────────────────┤
+│ ┌──────────────────────────────┐ │ ┌─────────────────────────────────┐ │
+│ │ EngineSound.ts               │ │ │ OrganicTerrainBuilder.ts        │ │
+│ │ • f1WhineGain.gain = 0.0     │ │ │ • Infield Box Mask:             │ │
+│ │   (Elimina tono 1.5-3.4 kHz) │ │ │   |x| <= 110 && |z| <= 110      │ │
+│ │ • Wind threshold: > 80 km/h  │ │ │   elevation = 0.0 estrictamente │ │
+│ │ • Tire scrub gate calibrado  │ │ └────────────────┬────────────────┘ │
+│ └──────────────┬───────────────┘ │                  │                  │
+│                │                 │ ┌────────────────▼────────────────┐ │
+│ ┌──────────────▼──────────────┐ │ │ TrackBuilder.ts                 │ │
+│ │ WaveShaper & Bus            │ │ │ • Arcén interior:                │ │
+│ │ • PreGain = 0.18 (Anti-IMD) │ │ │   radio 26.2 a 28.4 (sin solape) │ │
+│ │ • Master sin fritura parásita│ │ │ • Parche triangular en esquina  │ │
+│ └──────────────────────────────┘ │ │ • Exclusión de penachos de hierba│ │
+│                                  │ └─────────────────────────────────┘ │
+└──────────────────────────────────┴─────────────────────────────────────┘
 ```
-
-### Detalle de Módulos
-
-1. **`src/game/utils/MathPool.ts`**:
-   - Contiene vectores prealojados: `MathPool.V0` hasta `MathPool.V15`.
-   - Matrices y cuaterniones prealojados: `MathPool.M0`, `MathPool.Q0`.
-   - Métodos auxiliares de cálculo vectorial sin crear instancias nuevas.
-2. **`src/game/camera/CameraSystem.ts`**:
-   - Encapsula las 4 perspectivas de cámara del jugador (`chase`, `hood`, `bumper`, `orbit`).
-   - Orquesta la cámara cinematográfica de boxes (*pit lane 4K broadcast cam*).
-   - Controla el FOV dinámico dependiente de la velocidad y el suavizado de cabeceo/alabeo.
-3. **`src/game/race/RaceLoopManager.ts`**:
-   - Control de tiempo por vuelta, sectores 1, 2 y 3.
-   - Detección de vuelta rápida, persistencia en `localStorage` por circuito.
-   - Coordinación con eventos de boxes y banderas.
-4. **`src/game/collisions/CollisionSubsystem.ts`**:
-   - Detección y respuesta ante barreras perimetrales, pianos, muros de boxes y obstáculos dinámicos.
-   - Cálculo del impulso de impacto y aplicación de deformación sobre la malla del monoplaza (`CarModel`).
-5. **Refactorización de `src/game/RacingGameEngine.ts`**:
-   - Reducción del archivo principal a un coordinador limpio.
-   - Integración del acumulador de 120Hz en el bucle `animate()`.
-   - Conservación absoluta de todos los shaders, post-procesado, sombras y mallas gráficas.
 
 ---
 
-## 5. Fases de Ejecución
+## 5. Plan de Verificación
 
-1. **Fase 1: Infraestructura de Memoria (`MathPool`)**
-   - Crear `MathPool.ts` con todos los vectores, matrices y utilidades matemáticas prealojadas.
-2. **Fase 2: Extracción de Subsistemas**
-   - Crear `CameraSystem.ts` extrayendo la lógica de cámaras y FOV.
-   - Crear `RaceLoopManager.ts` extrayendo el cronometraje de sectores y récords.
-   - Crear `CollisionSubsystem.ts` extrayendo colisiones de pista y deformación.
-3. **Fase 3: Refactorización del Bucle Principal y Física 120Hz**
-   - Conectar los subsistemas en `RacingGameEngine.ts`.
-   - Implementar el acumulador de tiempo fijo (120Hz) con interpolación de renderizado.
-   - Reemplazar todas las asignaciones dinámicas por el uso de `MathPool`.
-   - Verificar que todos los shaders y efectos (Heat Haze, Speed Post Effect, luces, sombras y mallas) permanezcan exactamente en su sitio sin alteraciones visuales.
-4. **Fase 4: Verificación y Pruebas**
-   - Compilación con `compile_applet` y validación estricta con `lint_applet`.
-   - Verificación del comportamiento del juego en pista, respuesta de mandos, paradas en boxes y estabilidad de 60/120 FPS.
+1. **Prueba de Rodadura y Aceleración (Audio)**:
+   - Arrancar y acelerar progresivamente de 0 a 100 km/h.
+   - Confirmar la ausencia absoluta del silbido/portadora de radio a 1.5 kHz y de siseo blanco en aceleración.
+2. **Inspección Óptica de los 4 Vértices (Geometría)**:
+   - Recorrer las 4 curvas del Circuito 1 y verificar con cámara en tercera persona y rasante.
+   - Confirmar que el piano y el arcén se muestran con superficie limpia, asfalto íntegro y sin penetración poligonal de césped.
+3. **Verificación de Compilación**:
+   - Ejecutar `compile_applet` para asegurar 0 errores de compilación TypeScript.
